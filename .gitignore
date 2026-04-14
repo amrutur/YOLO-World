@@ -125,3 +125,24 @@ work_dirs
 # venus
 venus_run.sh
 
+# =====================================================================
+# personal/working-notes branch — local working tree additions.
+# These entries are present only on this branch, NOT intended for
+# upstream PRs. The working-notes branch also tracks CLAUDE.md and
+# docs/architecture_walkthrough.md, which are excluded upstream.
+# =====================================================================
+
+# Downloaded model weights (422 MB each, publicly available from
+# HuggingFace — see docs/install_notes_torch2.1_cu121.md).
+weights/
+
+# Demo output images (regeneratable).
+demo_outputs/
+
+# User-downloaded datasets (real COCO imagery / full LVIS annotations).
+# The tiny LVIS annotation stub at
+# data/coco/lvis/lvis_v1_minival_inserted_image_name.json is tracked via
+# `git add -f` despite this pattern (see Issue 7 in
+# docs/install_notes_torch2.1_cu121.md).
+data/coco/
+
