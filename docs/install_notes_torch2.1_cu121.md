@@ -440,3 +440,124 @@ Mentioning them so future installers don't lose an afternoon:
 Both of these caused real collateral damage during the install session that
 produced these notes (torch in `~/.local` got silently uninstalled when pip
 installed torch into the conda env).
+
+---
+
+## Personal branch workflow (amrutur's fork)
+
+> **Note:** This section is specific to the `personal/working-notes` branch
+> on `github.com/amrutur/YOLO-World`. It documents how to sync this branch
+> across machines and keep it up to date with upstream. It is NOT relevant
+> to anyone sending a PR upstream — those would go through `master` on a
+> clean fork.
+
+### Repository topology
+
+```
+AILab-CVC/YOLO-World  (upstream, no push access)
+    ↑
+    │
+amrutur/YOLO-World    (my fork)
+    ├── master                          mirrors upstream, kept clean for future PRs
+    ├── fix/reparameterize-syntaxerror  one-commit bug fix → upstream PR #652
+    └── personal/working-notes          this branch — fix + docs + CLAUDE.md + LVIS stub
+```
+
+The `personal/working-notes` branch is based off `fix/reparameterize-syntaxerror`,
+so the `import yolo_world` SyntaxError is pre-fixed. The two commits on top of
+upstream master are:
+
+1. the one-line SyntaxError fix in `yolo_world/models/detectors/yolo_world.py:61`
+2. the working-tree notes commit (this file, architecture walkthrough, CLAUDE.md,
+   LVIS stub, and branch-local `.gitignore` additions).
+
+### Clone + check out on a fresh machine
+
+```bash
+git clone https://github.com/amrutur/YOLO-World.git
+cd YOLO-World
+git checkout personal/working-notes
+```
+
+Then follow the "Reference install recipe" earlier in this file to build the
+conda env. Download the model weights from HuggingFace (links in the README);
+`weights/` is gitignored on this branch so the checkpoints do not ride along.
+The LVIS annotation stub at `data/coco/lvis/lvis_v1_minival_inserted_image_name.json`
+IS tracked, so `init_detector` works out of the box for text-prompt-only
+inference.
+
+### Adding more notes / updating the branch
+
+When adding more local docs, edits, experiments that you want backed up:
+
+```bash
+git checkout personal/working-notes
+# make edits
+git add <files>                             # or `git add -f <file>` if gitignored
+git commit -m "notes: <what you changed>"
+git push amrutur personal/working-notes
+git checkout master                         # back to master when done
+```
+
+### Keeping `personal/working-notes` in sync with upstream
+
+When `AILab-CVC/YOLO-World` gets new commits and you want to rebase your
+notes on top:
+
+```bash
+# 1. Pull upstream into your local master
+git fetch origin
+git checkout master
+git merge --ff-only origin/master
+
+# 2. Push the updated master to your fork (optional but tidy)
+git push amrutur master
+
+# 3. Rebase the fix branch on top of upstream master
+git checkout fix/reparameterize-syntaxerror
+git rebase master
+git push --force-with-lease amrutur fix/reparameterize-syntaxerror
+
+# 4. Rebase personal/working-notes on top of the updated fix branch
+git checkout personal/working-notes
+git rebase fix/reparameterize-syntaxerror
+git push --force-with-lease amrutur personal/working-notes
+```
+
+`--force-with-lease` is safe on personal branches that nobody else pulls
+from — it refuses to push if someone else has added commits in the
+meantime (which should never happen on a personal branch). Never use plain
+`--force` on shared branches.
+
+If the upstream SyntaxError fix lands (PR #652), the rebase will see that
+the fix branch's commit is already upstream and drop it automatically.
+At that point you can simplify by basing `personal/working-notes` directly
+off `master` instead of the fix branch.
+
+### Branch-local `.gitignore` vs master `.gitignore`
+
+On this branch, `.gitignore` has extra entries (`weights/`, `demo_outputs/`,
+`data/coco/`) that are NOT present on upstream master. Don't be surprised if
+those entries vanish when you switch to master — that's expected.
+
+The files kept OUT of version control on this branch (via those rules):
+
+| Pattern | Why excluded |
+|---|---|
+| `weights/` | 422 MB per checkpoint, re-download from HuggingFace |
+| `demo_outputs/` | Regeneratable in seconds from any checkpoint + input image |
+| `data/coco/` | Real COCO imagery is huge and user-specific |
+
+The files tracked DESPITE being in an ignored directory (via `git add -f`):
+
+| File | Size | Why tracked |
+|---|---|---|
+| `data/coco/lvis/lvis_v1_minival_inserted_image_name.json` | < 1 KB | Minimal stub so `init_detector` works without a real LVIS dataset (see Issue 7 above) |
+
+### Keeping this document alive
+
+If you evolve the install further, add new notes to this file on
+`personal/working-notes`, commit, and push. The living version of this doc
+lives at:
+
+`https://github.com/amrutur/YOLO-World/blob/personal/working-notes/docs/install_notes_torch2.1_cu121.md`
