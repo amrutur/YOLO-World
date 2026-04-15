@@ -443,6 +443,170 @@ installed torch into the conda env).
 
 ---
 
+## Running demos on a test image
+
+The quickest way to verify the install is end-to-end working is to run
+`demo/image_demo.py` on an image with a set of text prompts. The script
+takes four positional arguments (`config`, `checkpoint`, `image`, `text`)
+and optional flags like `--threshold` and `--topk`.
+
+### Prerequisites (should already be in place after the install recipe above)
+
+1. **The `yolo_world.py:61` SyntaxError fix** (Issue 3) — otherwise
+   `import yolo_world` fails before the demo can load anything.
+2. **`pip install lvis`** (Issue 6) — `init_detector` does `import lvis`
+   when building the config's test dataset.
+3. **The LVIS annotation stub** at
+   `data/coco/lvis/lvis_v1_minival_inserted_image_name.json` (Issue 7) —
+   `init_detector` actually parses this file even for text-only inference.
+
+### Example: L-1280 model on a 2560×1440 image
+
+```bash
+source /home/amrutur/miniconda3/etc/profile.d/conda.sh
+conda activate yolow
+python demo/image_demo.py \
+  configs/pretrain/yolo_world_v2_l_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_1280ft_lvis_minival.py \
+  weights/l_stage2-b3e3dc3f.pth \
+  /path/to/input_image.png \
+  "power socket,audio jack,USB port,motherboard,computer case" \
+  --threshold 0.1
+```
+
+Breakdown:
+
+| Argument | What it is |
+|---|---|
+| config | Model architecture config. For the L model at 640 input use `..._obj365v1_goldg_train_lvis_minival.py`; for 1280 use `..._1280ft_lvis_minival.py` |
+| checkpoint | `.pth` file downloaded from HuggingFace. For V2.1: `l_stage1-7d280586.pth` (640) or `l_stage2-b3e3dc3f.pth` (1280) from `huggingface.co/wondervictor/YOLO-World-V2.1` |
+| image | Path to a single image file OR a directory of `.png` / `.jpg` files |
+| text | Comma-separated class prompts. A `' '` padding prompt is auto-appended by the script. Alternatively, a path to a `.txt` file with one prompt per line |
+| `--threshold` | Drop detections with score below this (default 0.1) |
+| `--topk` | Keep at most this many detections (default 100) |
+| `--device` | Default `cuda:0` |
+
+The annotated output image is written to `demo_outputs/<basename>`.
+
+### Why the conda activation matters
+
+The `source ... && conda activate yolow &&` prefix is required for every
+new shell. The env's activation hooks at
+`~/miniconda3/envs/yolow/etc/conda/activate.d/isolate.sh` `unset PYTHONPATH`
+and `export PYTHONNOUSERSITE=1`, which prevents ROS Humble site-packages
+and `~/.local` user-site packages from leaking into `sys.path` (see
+"Pitfalls unrelated to the repo" above). Calling the env's python binary
+directly (`~/miniconda3/envs/yolow/bin/python demo/...`) **bypasses** the
+hooks and re-exposes the leak.
+
+### What the demo does internally
+
+1. Parses the CLI args.
+2. Loads the config: `cfg = Config.fromfile(args.config)`.
+3. Builds model + loads checkpoint via `init_detector(cfg, args.checkpoint, device='cuda:0')`.
+   This is where it also builds the test dataset — the reason the `lvis`
+   package and the annotation stub are needed.
+4. Builds the preprocessing pipeline (`YOLOv5KeepRatioResize` +
+   `LetterResize` + normalize).
+5. Splits the comma-separated text into `texts = [[t1], [t2], ..., [' ']]`
+   (padding auto-appended).
+6. Calls `model.reparameterize(texts)` — the method fixed by the Issue 3
+   patch. Runs the CLIP text encoder once and caches 512-dim embeddings on
+   `self.text_feats`.
+7. Letterboxes the input image to the config's target size (640×640 or
+   1280×1280), preserving aspect ratio with gray (114) padding.
+8. `model.test_step(data_batch)` runs backbone → VL-PAFPN → head.
+9. Filters by `--threshold` and keeps top-`--topk`.
+10. Draws boxes + labels via `supervision` and writes the result to
+    `demo_outputs/`.
+
+### Inspecting raw detections (before threshold / NMS)
+
+When you want to see the per-class cosine-similarity scores at all anchors
+— not just the filtered/annotated output — drive the model manually. Useful
+for debugging why a detection fires or misses:
+
+```python
+import warnings; warnings.filterwarnings('ignore')
+import cv2, torch
+from mmengine.config import Config
+from mmengine.dataset import Compose
+from mmdet.apis import init_detector
+from mmdet.utils import get_test_pipeline_cfg
+
+config_file = "configs/pretrain/yolo_world_v2_l_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_1280ft_lvis_minival.py"
+checkpoint  = "weights/l_stage2-b3e3dc3f.pth"
+image_path  = "/path/to/your/image.png"
+class_names = ["power socket", "audio jack", "USB port", "motherboard", "computer case"]
+
+cfg = Config.fromfile(config_file); cfg.load_from = checkpoint
+model = init_detector(cfg, checkpoint=checkpoint, device='cuda:0')
+tp = get_test_pipeline_cfg(cfg=cfg); tp[0].type = 'mmdet.LoadImageFromNDArray'
+test_pipeline = Compose(tp)
+
+image = cv2.imread(image_path)[:, :, [2, 1, 0]]  # BGR → RGB
+texts = [[c] for c in class_names] + [[' ']]    # append padding
+data_info = test_pipeline(dict(img=image, img_id=0, texts=texts))
+batch = dict(inputs=data_info['inputs'].unsqueeze(0),
+             data_samples=[data_info['data_samples']])
+with torch.no_grad():
+    out = model.test_step(batch)[0]
+pi = out.pred_instances
+
+# Top 5 detections per class, no threshold
+for ci, cname in enumerate(class_names):
+    ps = pi[pi.labels == ci]
+    if len(ps.scores) == 0:
+        print(f"{cname}: (no raw hits)"); continue
+    k = min(5, len(ps.scores))
+    order = ps.scores.float().topk(k)[1]; ps = ps[order]
+    print(f"{cname}:")
+    for i in range(k):
+        s = float(ps.scores[i]); b = ps.bboxes[i].cpu().numpy().tolist()
+        print(f"  score={s:.4f}  box=[{b[0]:.0f},{b[1]:.0f},{b[2]:.0f},{b[3]:.0f}]")
+```
+
+This bypasses the demo's thresholding and score-filtering entirely, letting
+you see the full distribution of raw logits for each class.
+
+### Notes on input resolution
+
+The preprocessing pipeline resizes and letterboxes the image to the config's
+target size (`(640, 640)` or `(1280, 1280)`) using `YOLOv5KeepRatioResize` +
+`LetterResize` with gray (114) padding. For a 2560×1440 input:
+
+- 640 config: scales by 0.25 → 640×360 + 280px vertical padding → 640×640.
+  A 15-pixel object becomes ~3.8 px (sub-cell on P3's stride-8 grid).
+- 1280 config: scales by 0.50 → 1280×720 + 560px vertical padding → 1280×1280.
+  A 15-pixel object becomes ~7.5 px (still under one P3 cell, but nearly).
+
+Small objects that were already marginal in the source image typically
+fall below the detector's spatial resolution after this downscale. If you
+need to detect sockets, jacks, or other very small features in a
+high-resolution image, options:
+
+1. Use the 1280 config (usually enough for objects ≥ 20 px in the source).
+2. Override `--cfg-options test_pipeline.1.scale="(2560,2560)"
+   test_pipeline.2.scale="(2560,2560)"` to run at full source resolution.
+   ~4× VRAM vs 1280; may OOM on 8 GB GPUs.
+3. Tile the image into overlapping crops, run detection per tile, merge
+   with NMS. Standard approach for aerial / microscopy imagery.
+
+### Prompt engineering tips
+
+- **Append specific alternatives**: `"power socket,audio jack,USB port"`
+  usually works better than `"power socket"` alone, because the model gets
+  to disambiguate between related concepts instead of picking the single
+  most similar CLIP embedding everywhere.
+- **Don't manually add the padding** `" "` at the end — `image_demo.py`
+  already appends it (`demo/image_demo.py:189-191`). Extra padding is
+  harmless but redundant.
+- Scores for rare/specific concepts (e.g. "IEC C14 inlet") are often
+  **low in absolute terms** (0.1-0.3) but high **relative to the scene's
+  distribution**. Look at the gap between the best match and the rest of
+  the pack, not just the absolute score.
+
+---
+
 ## Personal branch workflow (amrutur's fork)
 
 > **Note:** This section is specific to the `personal/working-notes` branch
